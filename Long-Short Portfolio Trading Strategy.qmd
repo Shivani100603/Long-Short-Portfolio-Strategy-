@@ -1,0 +1,441 @@
+---
+title: "Long-Short Portfolio Strategy Code"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## 
+
+#### Required Libraries
+
+```{r}
+
+# Libraries
+
+if (!require("pacman")) install.packages("pacman")
+
+
+
+library(foreign)
+library(readstata13) 
+library(data.table) 
+library(ggplot2)
+library(plotly)
+library(reshape2)
+library(zoo)
+library(readr)
+library(reshape2)  
+require(DEoptim)  
+require(ROI) 
+require(ROI.plugin.glpk)
+require(ROI.plugin.quadprog)
+require(PortfolioAnalytics) # Used to calculate the Maximum Drawdown
+require(plotly)
+require(foreach)
+require(doMC)
+
+
+```
+
+#### Dataset
+
+```{r}
+
+
+# Dataset used is a cleaned version of Kenneth's French's Data Library. 49 Industry Portfolio File
+
+# Link to dataset: https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
+
+
+Dataset <- read.csv("ASSIGNMENT MATERIALS-20251211/49_Industry_Portfolios.csv", header=TRUE)
+
+
+# Setting different column names as vectors
+
+colnames(Dataset) <- c("date","Agric", "Food" , "Soda" , "Beer" , "Smoke" , "Toys" , "Fun" , "Books" , "Hshld" , "Clths" , "Hlth", "MedEq" , "Drugs" , "Chems" , "Rubbr" , "Txtls" , "BldMt" , "Cnstr" , "Steel" , "FabPr" , "Mach " , "ElcEq" , "Autos" , "Aero " , "Ships" , "Guns" , "Gold " , "Mines" , "Coal " , "Oil" , "Util" , "Telcm"  , "PerSv"  , "BusSv" , "Hardw" , "Softw" , "Chips" , "LabEq" , "Paper" , "Boxes" , "Trans" , "Whlsl" , "Rtail" , "Meals" , "Banks" , "Insur" , "RlEst" , "Fin" , "Other" )  
+
+
+# Changing the format of the dataset into a suitable time series format.
+
+Dataset$date <- as.yearmon(as.character(Dataset$date), format = "%Y%m")
+Dataset <- zoo(Dataset[ , 2:NCOL(Dataset)], Dataset$date)
+
+Dataset <- window(Dataset,start = "2000-01")
+
+
+
+```
+
+#### Factor Data
+
+```{r}
+
+# Factor Data:
+
+# https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
+
+
+# Fama French Factors
+
+Fama_French_Factors <- read.csv("ASSIGNMENT MATERIALS-20251211/Fama_French_Factors.csv", header = TRUE)
+colnames(Fama_French_Factors) <- c("date" , "mkt_rf" , "smb" , "hml" , "rf")
+Fama_French_Factors$date <- as.yearmon(as.character(Fama_French_Factors$date), format = "%Y%m")
+
+
+# Momentum Factor Data
+
+Momentum_Factor <- read.csv("ASSIGNMENT MATERIALS-20251211/Momentum_Factor.csv", header = TRUE)
+colnames(Momentum_Factor) <- c("date" , "Momentum") 
+Momentum_Factor$date <- as.yearmon(as.character(Momentum_Factor$date), format = "%Y%m")
+
+
+# Merging the data:
+
+
+Merged_Factors <- merge(Fama_French_Factors,Momentum_Factor, by.x = "date", by.y = "date" , all = FALSE)
+
+# Removing Risk Factor Column
+
+No_RF_Merged_Factors <- Merged_Factors[ , -5]
+
+# Setting it to appropriate date format
+
+No_RF_Merged_Factors$date <- as.yearmon(as.character(No_RF_Merged_Factors$date), format = "%Y%m")
+
+# Setting it to time series format using zoo
+
+No_RF_Merged_Factors <- zoo(No_RF_Merged_Factors [ , 2:NCOL(No_RF_Merged_Factors)] , No_RF_Merged_Factors$date)
+
+# Start Window 
+
+No_RF_Merged_Factors <- window(No_RF_Merged_Factors, start = "2000-01")
+
+
+
+# Defining risk free rate and excess returns
+
+Risk_Free_Rate <- Merged_Factors$RF
+
+Excess_Returns <- Dataset - Risk_Free_Rate 
+
+
+# Checking our data
+
+View(Risk_Free_Rate) 
+
+# Checking our data
+
+View(Excess_Returns)
+
+```
+
+#### Function for generating regressions for all the industries
+
+```{r}
+
+
+Assignment_Factor_model <- function(LHS,RHS){
+  ALPHAS <- NULL
+  BETAS <- NULL # Initial value of beta, a place to store values
+  R_SQUARED <- NULL
+  T_Statistic <- NULL
+  RESIDUALS <- zoo(rep(NA,NROW(LHS)),index(LHS)) 
+   
+  
+  
+  START.WINDOW <- max(start(LHS), start(RHS))
+  END.WINDOW <- min(end(LHS), end(RHS))
+  
+  
+  LHS <- window(LHS, start = START.WINDOW, end = END.WINDOW)
+  RHS <- window(RHS, start = START.WINDOW, end = END.WINDOW)
+  
+  # Store residuals and alphas from regressions
+  
+  for(i in 1:NCOL(LHS)){
+    M <- lm(LHS[ , i] ~ RHS) 
+    cat(colnames(LHS)[i])
+    print(summary(M))
+    ALPHAS <- c(ALPHAS,coef(M)[1]) 
+    B <- coef(M)[2:length(coef(M))] 
+    BETAS <- rbind(BETAS,B)  
+    RESIDUALS <- merge(RESIDUALS,residuals(M),all = TRUE) 
+    R_SQUARED <- c(R_SQUARED,summary(M)$r.squared)
+    T_Statistic <- c(T_Statistic, summary(M)$coefficients[, "t value"]
+
+)
+    colnames(RESIDUALS) <- NULL 
+  }
+  
+  RESIDUALS <- RESIDUALS[ , 2:NCOL(RESIDUALS)]
+    colnames(RESIDUALS) <- names(ALPHAS) <- 1:NCOL(LHS)
+    colnames(BETAS) <- colnames(RHS)
+    rownames(BETAS) <- 1:NCOL(LHS) 
+    N_Rows_LHS <- NROW(LHS) 
+    N_Columns_LHS <- NCOL(LHS)  
+    N_Columns_RHS <- NCOL(RHS) 
+    
+    
+    List_of_Variables <- list(Alpha=ALPHAS,Beta=BETAS,Residuals = RESIDUALS, N_Rows_LHS = N_Rows_LHS, N_Columns_LHS = N_Columns_LHS, N_Columns_RHS = N_Columns_RHS, R_squared = R_SQUARED, T_Statistic = T_Statistic)
+    return(List_of_Variables)               
+                   
+  
+}
+
+
+
+# Defining the Right Hand Side of the equation
+
+RHS.MB <- No_RF_Merged_Factors[ , 1:4 , drop = FALSE]
+
+# Running the Regression
+
+MB <- Assignment_Factor_model(LHS=Excess_Returns,RHS = RHS.MB)
+
+
+
+
+
+```
+
+#### Defining the function for the long-short portfolio strategy
+
+```{r}
+
+# The function is credited and adapted from the source:
+
+# https://rpubs.com/Carlosyepiz1/1305576
+
+
+# Installing the xts library to convert returns into a time series format.
+
+install.packages("xts")
+
+library(xts)
+
+
+
+Constructing_Long_Short_Portfolio_Strategy <- function(Asset_Returns , window_size = 12, top_n = 10){
+  
+  
+  Dates <- index(Dataset)
+  
+  Number_of_Periods <- length(Dates) - window_size
+  Portfolio_Returns <- numeric(Number_of_Periods)
+  Estimated_Momentum_Betas <- MB[['Beta']][  , 'Mom']
+  Selected_Long_Assets <- list() 
+  Selected_Short_Assets <- list()
+  Betas_Question_Two <- MB[['Beta']]
+  All_betas <- list()
+  
+ 
+  # Rolling:
+  
+  
+  for(i in 1:Number_of_Periods){
+    Start_Period <- i
+    End_Period <- i + window_size - 1
+    
+    window_returns <- Asset_Returns[Start_Period:End_Period ,]
+    
+
+    # Inner Loop for Beta Estimation
+    
+    
+      Asset_Names <- colnames(window_returns)
+      
+      period_betas <- data.frame(
+        Asset = Asset_Names,
+        b = Estimated_Momentum_Betas)
+      
+      All_betas[[i]] <- period_betas
+      
+
+      # Ranking
+      
+      
+      # Selecting top N assets with positive betas for LONG positions
+      
+      b <- numeric(ncol(window_returns))
+      
+      Long_Beta_Dataset <- period_betas %>%
+        
+        arrange(desc(b)) %>%
+        head(top_n)
+      
+      
+      # Selecting bottom N assets with negative betas for SHORT positions
+      
+      Short_Beta_Dataset <- period_betas %>%
+        
+        arrange(b) %>%
+        head(top_n)
+      
+# Selecting Long/Short
+
+    
+    
+    Selected_Long_Assets[[i]] <- Long_Beta_Dataset$Asset
+    Selected_Short_Assets[[i]] <- Short_Beta_Dataset$Asset
+    
+    Long_Index <- match(Long_Beta_Dataset$Asset, Asset_Names)
+    Short_Index <- match(Short_Beta_Dataset$Asset, Asset_Names)
+    
+    
+
+# Portfolio Return Logic
+
+    Next_Month_Return <- 0 
+    
+    # Code for equal weights in Long and short.
+    
+    if (length (Long_Index) > 0 && length(Short_Index) > 0) {
+      Long_Weights <- rep(0.5/length(Long_Index), length(Long_Index))
+      Short_Weights <- rep(-0.5/length(Short_Index), length(Short_Index))
+    
+
+    # Calculating returns
+    
+    Next_Month_Long_Return <- as.numeric(Asset_Returns[End_Period + 1, Long_Index])
+    
+    Next_Month_Short_Return <- as.numeric(Asset_Returns[End_Period + 1, Short_Index])
+   
+    
+    # Combining long and short returns
+    
+    Long_Return <- sum(Long_Weights *    Next_Month_Long_Return , na.rm = TRUE)
+    
+    Short_Return <- sum(Short_Weights * Next_Month_Short_Return, na.rm = TRUE)
+    
+    Next_Month_Return <- Long_Return + Short_Return
+  
+  } else if (length(Long_Index) > 0) {
+    
+    # Only Long Positions Avaliable
+    
+    Long_Weights <- rep(1/length(Long_Index) , length(Long_Index))
+    Next_Month_Long_Return <- as.numeric(Asset_Returns[End_Period + 1, Long_Index])
+    
+    Next_Month_Return <- sum(Long_Weights * Next_Month_Long_Return, na.rm = TRUE)
+    
+  } else if (length(Short_Index) > 0){
+    
+    # Only short positions avaliable
+    
+    Short_Weights <- rep(-1/length(Short_Index), length(Short_Index))
+    
+    Next_Month_Short_Return <- as.numeric(Asset_Returns[End_Period + 1, Short_Index])
+    
+    Next_Month_Return <- sum(Short_Weights * Next_Month_Short_Return, na.rm = TRUE)
+    
+  } else {
+    Next_Month_Return <- 0
+  }
+  
+  Portfolio_Returns[i] <- Next_Month_Return  # 
+
+} # End Outer Loop
+
+return(Portfolio_Returns)
+
+} # End Function
+
+# Installing the xts library to convert returns into a time series format.
+
+install.packages("xts")
+
+library(xts)
+
+# Window size is set to 12 so that we can calculate our returns from 2001. This could also be tried with different window sizes 
+# to see the difference in returns. 
+
+Long_Short_Portfolio_Returns <- Constructing_Long_Short_Portfolio_Strategy(Dataset,12, 10)
+
+
+print(Long_Short_Portfolio_Returns)
+
+plot(Long_Short_Portfolio_Returns)
+```
+
+#### Time Series Plot
+
+```{r}
+
+
+# Time series plot
+
+library(ggplot2)
+
+df <- data.frame(
+  Date = index(Long_Short_Portfolio_Returns_ts),
+  Returns = (Long_Short_Portfolio_Returns)
+)
+
+ggplot(df, aes(Date, Returns)) +
+  geom_line() +
+  geom_hline(yintercept = 0, color = "red", linewidth = 0.6) +
+  theme_bw() +
+  labs(
+    title = "Time Series Plot of Long Short Returns",
+    x = "Date (Month-Year)",
+    y = "Monthly Returns (%) "
+  )
+
+
+```
+
+#### Cumulative Returns Plot
+
+```{r}
+
+
+
+# Setting window size to 12. You can change this with respect to how much past data you use. 
+
+window_size = 12
+
+Long_Short_Portfolio_Returns_ts <- xts(Long_Short_Portfolio_Returns, order.by = Dates[(window_size + 1):length(Dates)])
+
+
+# Cumulative Returns Plot 
+
+Cumulative_Returns_Time_Series <- cumprod(1 + Long_Short_Portfolio_Returns_ts)
+
+plot(Cumulative_Returns_Time_Series , main = "Cumulative Returns Plot" , xlab = "Date (Month-Year)" , ylab = "Monthly Returns (%) ")
+
+
+
+```
+
+#### Performance Metrics
+
+```{r}
+
+# Annualised Monthly Returns
+
+Mean_Monthly_Returns <- mean(Long_Short_Portfolio_Returns,na.rm =TRUE)
+Annualised_Average_Monthly_Returns <- (1 + Mean_Monthly_Returns)^12- 1
+print(Annualised_Average_Monthly_Returns)
+
+
+# Annualised Standard Deviation
+
+SD_Monthy <- sd(Long_Short_Portfolio_Returns,na.rm = TRUE)
+Annualised_Standard_Deviation <- SD_Monthy * sqrt(12)
+print(Annualised_Standard_Deviation)
+
+
+# Sharpe Ratio (Annually)
+
+Sharpe_Ratio <- ((Annualised_Average_Monthly_Returns - 0.03) / Annualised_Standard_Deviation)
+print(Sharpe_Ratio)
+
+# Maximum Drawdown
+library(PerformanceAnalytics)
+maxDrawdown( R = Long_Short_Portfolio_Returns_ts , geometric = FALSE )
+
+```
